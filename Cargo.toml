@@ -1,0 +1,15 @@
+[package]
+name = "p2p-recipes"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+libp2p = { version = "0.51.3", features = ["tcp", "mdns", "floodsub"] }
+log = "0.4.19"
+once_cell = "1.18.0"
+pretty_env_logger = "0.5.0"
+serde = { version = "1.0.164", features = ["derive"] }
+serde_json = "1.0.96"
+tokio = { version = "1.28.2", features = ["fs", "rt", "rt-multi-thread", "time", "macros", "sync", "io-util", "io-std"] }
