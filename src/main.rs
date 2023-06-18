@@ -1,13 +1,13 @@
 use libp2p::{
     core::upgrade,
-    floodsub::{Floodsub, FloodsubEvent, Topic},
+    floodsub::{Floodsub, Topic},
     futures::StreamExt,
     identity::{self, PeerId},
-    mdns::{Event, Mdns},
-    mplex,
-    noise::{Keypair, NoiseConfig, X25519Spec},
-    swarm::{self, derive_prelude, , Swarm, SwarmBuilder},
+    mdns,
+    noise::Config,
+    swarm::{self, Swarm, SwarmBuilder},
     tcp::{self, tokio::Transport},
+    yamux,
 };
 use log::{error, info};
 use once_cell::sync::Lazy;
@@ -59,7 +59,7 @@ enum EventType {
 #[derive(swarm::NetworkBehaviour)]
 struct RecipeBehaviour {
     floodsub: Floodsub,
-    mdns: Mdns,
+    mdns: mdns::Config,
     #[behaviour(ignore)]
     response_sender: mpsc::UnboundedSender<ListResponse>,
 }
@@ -188,19 +188,22 @@ async fn main() {
     info!("Peer Id: {}", PEER_ID.clone());
     let (response_sender, mut response_rcv) = mpsc::unbounded_channel();
 
-    let auth_keys = Keypair::<X25519Spec>::new()
+    let auth_keys = Config::new()
         .into_authentic(&KEYS)
         .expect("can create auth keys");
+    // let auth_keys = Keypair::<X25519Spec>::new()
+    //     .into_authentic(&KEYS)
+    //     .expect("can create auth keys");
 
     let transp = Transport::new(tcp::Config::default())
         .upgrade(upgrade::Version::V1)
-        .authenticate(NoiseConfig::xx(auth_keys).into_authenticated()) // XX Handshake pattern, IX exists as well and IK - only XX currently provides interop with other libp2p impls
-        .multiplex(mplex::MplexConfig::new())
+        .authenticate(Config::xx(auth_keys).into_authenticated()) // XX Handshake pattern, IX exists as well and IK - only XX currently provides interop with other libp2p impls
+        .multiplex(yamux::Config::new())
         .boxed();
 
     let mut behaviour = RecipeBehaviour {
         floodsub: Floodsub::new(PEER_ID.clone()),
-        mdns: Mdns::new(Default::default())
+        mdns: mdns::Config::new(Default::default())
             .await
             .expect("can create mdns"),
         response_sender,
