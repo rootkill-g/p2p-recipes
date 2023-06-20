@@ -1,13 +1,14 @@
 use libp2p::{
     core::upgrade,
-    floodsub::{Floodsub, Topic},
+    floodsub::{Floodsub, FloodsubEvent, Topic},
     futures::StreamExt,
-    identity::{self, PeerId},
-    mdns,
-    noise::Config,
-    swarm::{self, Swarm, SwarmBuilder},
-    tcp::{self, tokio::Transport},
-    yamux,
+    identity,
+    mdns::{Mdns, MdnsEvent},
+    mplex,
+    noise::{Keypair, NoiseConfig, X25519Spec},
+    swarm::{NetworkBehaviourEventProcess, Swarm, SwarmBuilder},
+    tcp::TokioTcpConfig,
+    NetworkBehaviour, PeerId, Transport,
 };
 use log::{error, info};
 use once_cell::sync::Lazy;
@@ -56,48 +57,48 @@ enum EventType {
     Input(String),
 }
 
-#[derive(swarm::NetworkBehaviour)]
+#[derive(NetworkBehaviour)]
 struct RecipeBehaviour {
     floodsub: Floodsub,
-    mdns: mdns::Config,
+    mdns: Mdns,
     #[behaviour(ignore)]
     response_sender: mpsc::UnboundedSender<ListResponse>,
 }
 
-// impl NetworkBehaviourEventProcess<FloodsubEvent> for RecipeBehaviour {
-//     fn inject_event(&mut self, event: FloodsubEvent) {
-//         match event {
-//             FloodsubEvent::Message(msg) => {
-//                 if let Ok(resp) = serde_json::from_slice::<ListResponse>(&msg.data) {
-//                     if resp.receiver == PEER_ID.to_string() {
-//                         info!("Response from {}:", msg.source);
-//                         resp.data.iter().for_each(|r| info!("{:?}", r));
-//                     }
-//                 } else if let Ok(req) = serde_json::from_slice::<ListRequest>(&msg.data) {
-//                     match req.mode {
-//                         ListMode::ALL => {
-//                             info!("Received ALL req: {:?} from {:?}", req, msg.source);
-//                             respond_with_public_recipes(
-//                                 self.response_sender.clone(),
-//                                 msg.source.to_string(),
-//                             );
-//                         }
-//                         ListMode::One(ref peer_id) => {
-//                             if peer_id == &PEER_ID.to_string() {
-//                                 info!("Received req: {:?} from {:?}", req, msg.source);
-//                                 respond_with_public_recipes(
-//                                     self.response_sender.clone(),
-//                                     msg.source.to_string(),
-//                                 );
-//                             }
-//                         }
-//                     }
-//                 }
-//             }
-//             _ => (),
-//         }
-//     }
-// }
+impl NetworkBehaviourEventProcess<FloodsubEvent> for RecipeBehaviour {
+    fn inject_event(&mut self, event: FloodsubEvent) {
+        match event {
+            FloodsubEvent::Message(msg) => {
+                if let Ok(resp) = serde_json::from_slice::<ListResponse>(&msg.data) {
+                    if resp.receiver == PEER_ID.to_string() {
+                        info!("Response from {}:", msg.source);
+                        resp.data.iter().for_each(|r| info!("{:?}", r));
+                    }
+                } else if let Ok(req) = serde_json::from_slice::<ListRequest>(&msg.data) {
+                    match req.mode {
+                        ListMode::ALL => {
+                            info!("Received ALL req: {:?} from {:?}", req, msg.source);
+                            respond_with_public_recipes(
+                                self.response_sender.clone(),
+                                msg.source.to_string(),
+                            );
+                        }
+                        ListMode::One(ref peer_id) => {
+                            if peer_id == &PEER_ID.to_string() {
+                                info!("Received req: {:?} from {:?}", req, msg.source);
+                                respond_with_public_recipes(
+                                    self.response_sender.clone(),
+                                    msg.source.to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+}
 
 fn respond_with_public_recipes(sender: mpsc::UnboundedSender<ListResponse>, receiver: String) {
     tokio::spawn(async move {
@@ -117,24 +118,24 @@ fn respond_with_public_recipes(sender: mpsc::UnboundedSender<ListResponse>, rece
     });
 }
 
-// impl NetworkBehaviourEventProcess<MdnsEvent> for RecipeBehaviour {
-//     fn inject_event(&mut self, event: MdnsEvent) {
-//         match event {
-//             MdnsEvent::Discovered(discovered_list) => {
-//                 for (peer, _addr) in discovered_list {
-//                     self.floodsub.add_node_to_partial_view(peer);
-//                 }
-//             }
-//             MdnsEvent::Expired(expired_list) => {
-//                 for (peer, _addr) in expired_list {
-//                     if !self.mdns.has_node(&peer) {
-//                         self.floodsub.remove_node_from_partial_view(&peer);
-//                     }
-//                 }
-//             }
-//         }
-//     }
-// }
+impl NetworkBehaviourEventProcess<MdnsEvent> for RecipeBehaviour {
+    fn inject_event(&mut self, event: MdnsEvent) {
+        match event {
+            MdnsEvent::Discovered(discovered_list) => {
+                for (peer, _addr) in discovered_list {
+                    self.floodsub.add_node_to_partial_view(peer);
+                }
+            }
+            MdnsEvent::Expired(expired_list) => {
+                for (peer, _addr) in expired_list {
+                    if !self.mdns.has_node(&peer) {
+                        self.floodsub.remove_node_from_partial_view(&peer);
+                    }
+                }
+            }
+        }
+    }
+}
 
 async fn create_new_recipe(name: &str, ingredients: &str, instructions: &str) -> Result<()> {
     let mut local_recipes = read_local_recipes().await?;
@@ -188,22 +189,19 @@ async fn main() {
     info!("Peer Id: {}", PEER_ID.clone());
     let (response_sender, mut response_rcv) = mpsc::unbounded_channel();
 
-    let auth_keys = Config::new()
+    let auth_keys = Keypair::<X25519Spec>::new()
         .into_authentic(&KEYS)
         .expect("can create auth keys");
-    // let auth_keys = Keypair::<X25519Spec>::new()
-    //     .into_authentic(&KEYS)
-    //     .expect("can create auth keys");
 
-    let transp = Transport::new(tcp::Config::default())
+    let transp = TokioTcpConfig::new()
         .upgrade(upgrade::Version::V1)
-        .authenticate(Config::xx(auth_keys).into_authenticated()) // XX Handshake pattern, IX exists as well and IK - only XX currently provides interop with other libp2p impls
-        .multiplex(yamux::Config::new())
+        .authenticate(NoiseConfig::xx(auth_keys).into_authenticated()) // XX Handshake pattern, IX exists as well and IK - only XX currently provides interop with other libp2p impls
+        .multiplex(mplex::MplexConfig::new())
         .boxed();
 
     let mut behaviour = RecipeBehaviour {
         floodsub: Floodsub::new(PEER_ID.clone()),
-        mdns: mdns::Config::new(Default::default())
+        mdns: Mdns::new(Default::default())
             .await
             .expect("can create mdns"),
         response_sender,
